@@ -82,8 +82,8 @@ def fetch_info(url):
             m = re.search(r'property="og:title" content="([^"]+)"', html)
         title = re.sub(r'<[^>]+>', '', m.group(1)).strip() if m else None
 
-        # 설명
-        m = re.search(r'<div class="tgme_page_description[^"]*">([\s\S]*?)</div>', html, re.I)
+        # 설명 (dir="auto" 등 추가 속성 있어도 매칭되도록 [^>]* 사용)
+        m = re.search(r'<div class="tgme_page_description[^>]*>([\s\S]*?)</div>', html, re.I)
         if not m:
             m = re.search(r'property="og:description" content="([^"]+)"', html)
         description = re.sub(r'<[^>]+>', '', m.group(1)).strip() if m else None
