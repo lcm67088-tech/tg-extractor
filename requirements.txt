@@ -1,0 +1,3 @@
+# 표준 라이브러리만 사용 (별도 설치 불필요)
+# Python 3.8+ 필요
+# tkinter, urllib, threading, concurrent.futures, csv, re - 모두 내장
