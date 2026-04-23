@@ -58,9 +58,24 @@ def clean_desc(desc):
     return desc.strip()
 
 
+def _fetch_html(url, headers):
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+    try:
+        return raw.decode('utf-8')
+    except Exception:
+        return raw.decode('cp949', errors='replace')
+
+
+def _parse_html_clean(html, pattern, flags=re.I):
+    m = re.search(pattern, html, flags)
+    return re.sub(r'<[^>]+>', '', m.group(1)).strip() if m else None
+
+
 def fetch_info(url):
-    """텔레그램 페이지에서 정보 파싱"""
-    headers = {
+    """텔레그램 페이지에서 정보 파싱 (기본 + /s/ 미리보기 병행)"""
+    HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
                       'AppleWebKit/537.36 (KHTML, like Gecko) '
                       'Chrome/120.0.0.0 Safari/537.36',
@@ -68,56 +83,104 @@ def fetch_info(url):
         'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8',
     }
     try:
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read()
-            try:
-                html = raw.decode('utf-8')
-            except Exception:
-                html = raw.decode('cp949', errors='replace')
+        html = _fetch_html(url, HEADERS)
 
-        # 제목
-        m = re.search(r'<div class="tgme_page_title"[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)</span>', html, re.I)
-        if not m:
-            m = re.search(r'property="og:title" content="([^"]+)"', html)
-        title = re.sub(r'<[^>]+>', '', m.group(1)).strip() if m else None
+        # ── 제목 ──
+        title = _parse_html_clean(html, r'<div class="tgme_page_title"[^>]*>[\s\S]*?<span[^>]*>([\s\S]*?)</span>')
+        if not title:
+            title = _parse_html_clean(html, r'property="og:title" content="([^"]+)"')
 
-        # 설명 (dir="auto" 등 추가 속성 있어도 매칭되도록 [^>]* 사용)
-        m = re.search(r'<div class="tgme_page_description[^>]*>([\s\S]*?)</div>', html, re.I)
-        if not m:
-            m = re.search(r'property="og:description" content="([^"]+)"', html)
-        description = re.sub(r'<[^>]+>', '', m.group(1)).strip() if m else None
+        # ── 설명 ──
+        description = _parse_html_clean(html, r'<div class="tgme_page_description[^>]*>([\s\S]*?)</div>')
+        if not description:
+            description = _parse_html_clean(html, r'property="og:description" content="([^"]+)"')
         description = clean_desc(description)
 
-        # 멤버수
+        # ── 멤버수 ──
         m_extra = re.search(r'<div class="tgme_page_extra">([\s\S]*?)</div>', html, re.I)
         extra_text = re.sub(r'<[^>]+>', '', m_extra.group(1)).strip() if m_extra else ''
         m_mem = re.search(r'([\d\s,]+)\s*(subscribers?|members?|참여자|구독자)', extra_text + ' ' + html, re.I)
         members = re.sub(r'[\s,]', '', m_mem.group(1)).strip() if m_mem else None
 
-        # 타입 판별
+        # ── 프로필 사진 ──
+        m_photo = re.search(r'<img class="tgme_page_photo_image"[^>]*src="([^"]+)"', html)
+        photo = m_photo.group(1) if m_photo else None
+
+        # ── 타입 판별 ──
         m_action = re.search(r'<a class="tgme_action_button_new[^"]*"[^>]*>([\s\S]*?)</a>', html, re.I)
         action = re.sub(r'<[^>]+>', '', m_action.group(1)).strip() if m_action else None
 
         link_type = 'unknown'
-        if action == 'View Channel' or 'subscribers' in html: link_type = 'channel'
-        elif action == 'Join Group' or 'members' in html:     link_type = 'group'
-        elif action == 'Send Message':                         link_type = 'user'
-        elif '/+' in url or '/joinchat/' in url:              link_type = 'invite_group'
+        if action == 'View Channel' or 'subscribers' in html:  link_type = 'channel'
+        elif action == 'Join Group' or 'members' in html:      link_type = 'group'
+        elif action == 'Send Message':                          link_type = 'user'
+        elif '/+' in url or '/joinchat/' in url:               link_type = 'invite_group'
 
-        # username
+        # ── username ──
         m_user = re.search(r'<div class="tgme_page_extra">\s*@([a-zA-Z0-9_]+)\s*</div>', html)
         username = m_user.group(1) if m_user else None
 
+        # ── /s/ 미리보기 페이지 추가 파싱 (공개채널만, 최근 게시글/공지) ──
+        recent_posts = []
+        pinned_post  = None
+        preview_url  = None
+
+        is_invite = '/+' in url or '/joinchat/' in url
+        if not is_invite and username:
+            preview_url = f"https://t.me/s/{username}"
+        elif not is_invite and link_type in ('channel', 'group'):
+            # URL에서 username 추출 시도
+            m_uname = re.search(r't\.me/([A-Za-z0-9_]{3,})', url)
+            if m_uname:
+                preview_url = f"https://t.me/s/{m_uname.group(1)}"
+
+        if preview_url:
+            try:
+                s_html = _fetch_html(preview_url, HEADERS)
+
+                # 최근 게시글 (최대 5개)
+                raw_msgs = re.findall(
+                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>',
+                    s_html
+                )
+                for raw in raw_msgs[:5]:
+                    text = re.sub(r'<[^>]+>', '', raw).strip()
+                    text = re.sub(r'\s+', ' ', text)
+                    if text and len(text) > 5:
+                        recent_posts.append(text[:300])
+
+                # 핀 메시지 (공지)
+                m_pin = re.search(
+                    r'tgme_widget_message_pinned[\s\S]*?'
+                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>',
+                    s_html
+                )
+                if m_pin:
+                    pinned_post = re.sub(r'<[^>]+>', '', m_pin.group(1)).strip()
+                    pinned_post = re.sub(r'\s+', ' ', pinned_post)[:300]
+
+                # /s/ 페이지에서 멤버수 보완
+                if not members:
+                    m_mem2 = re.search(r'([\d\s,]+)\s*(subscribers?|members?)', s_html, re.I)
+                    if m_mem2:
+                        members = re.sub(r'[\s,]', '', m_mem2.group(1)).strip()
+
+            except Exception:
+                pass  # /s/ 실패해도 기본 정보는 있음
+
         return {
-            'status': 'ok',
-            'title': title,
-            'description': description,
-            'members': members,
-            'type': link_type,
-            'action': action,
-            'username': username,
-            'is_invite': '/+' in url or '/joinchat/' in url,
+            'status':       'ok',
+            'title':        title,
+            'description':  description,
+            'members':      members,
+            'type':         link_type,
+            'action':       action,
+            'username':     username,
+            'photo':        photo,
+            'is_invite':    is_invite,
+            'recent_posts': recent_posts,   # 최근 게시글 리스트
+            'pinned_post':  pinned_post,    # 공지(핀 메시지)
+            'preview_url':  preview_url,
         }
     except Exception as e:
         return {'status': 'error', 'error': str(e)}
@@ -671,7 +734,7 @@ class App(tk.Tk):
         ))
 
     def _show_info_panel(self, info, url, loading=False):
-        self.info_text.config(state='normal', height=6)
+        self.info_text.config(state='normal', height=10)
         self.info_text.delete('1.0', 'end')
         if loading:
             self.info_text.insert('end', f"⏳ 조회 중... {url}")
@@ -683,14 +746,21 @@ class App(tk.Tk):
                 'channel':'채널','group':'그룹','user':'유저',
                 'invite_group':'초대그룹','private':'비공개','unknown':'?'
             }
-            lines = [
-                f"📌 제목: {info.get('title') or '(없음)'}",
-                f"🏷  타입: {TYPE_LABEL.get(info.get('type',''), info.get('type',''))}",
-            ]
-            if info.get('username'): lines.append(f"👤 유저명: @{info['username']}")
-            if info.get('members'):  lines.append(f"👥 멤버수: {info['members']}명")
-            if info.get('description'): lines.append(f"📝 설명: {info['description'][:200]}")
-            lines.append(f"🔗 URL: {url}")
+            lines = []
+            lines.append(f"📌 제목    : {info.get('title') or '(없음)'}")
+            lines.append(f"🏷  타입    : {TYPE_LABEL.get(info.get('type',''), info.get('type','') or '알 수 없음')}")
+            if info.get('username'): lines.append(f"👤 유저명  : @{info['username']}")
+            if info.get('members'):  lines.append(f"👥 멤버수  : {info['members']}명")
+            lines.append(f"📝 설명    : {info.get('description') or '(없음)'}")
+            # 공지 (핀 메시지)
+            if info.get('pinned_post'):
+                lines.append(f"📢 공지    : {info['pinned_post'][:300]}")
+            # 최근 게시글
+            if info.get('recent_posts'):
+                lines.append(f"📰 최근글  :")
+                for i, post in enumerate(info['recent_posts'][:5], 1):
+                    lines.append(f"   [{i}] {post[:200]}")
+            lines.append(f"🔗 URL     : {url}")
             self.info_text.insert('end', '\n'.join(lines))
         self.info_text.config(state='disabled')
 
@@ -740,13 +810,20 @@ class App(tk.Tk):
         if not path: return
         with open(path, 'w', newline='', encoding='utf-8-sig') as f:
             w = csv.writer(f)
-            w.writerow(['번호','URL','타입','제목','설명','멤버수','채널구분','출처파일'])
+            w.writerow(['번호','URL','링크타입','제목','설명','공지','최근게시글','멤버수','채널타입','유저명','출처파일'])
             for i, l in enumerate(self.filtered):
                 info = l.get('info') or {}
+                recent = ' | '.join(info.get('recent_posts') or [])
                 w.writerow([
                     i+1, l['url'], l['type'],
-                    info.get('title',''), clean_desc(info.get('description','')),
-                    info.get('members',''), info.get('type',''), l['source']
+                    info.get('title',''),
+                    info.get('description',''),
+                    info.get('pinned_post',''),
+                    recent,
+                    info.get('members',''),
+                    info.get('type',''),
+                    info.get('username',''),
+                    l['source'],
                 ])
         self._toast(f"{len(self.filtered)}개 CSV 저장!")
 
