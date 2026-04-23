@@ -94,6 +94,13 @@ def fetch_info(url):
         description = _parse_html_clean(html, r'<div class="tgme_page_description[^>]*>([\s\S]*?)</div>')
         if not description:
             description = _parse_html_clean(html, r'property="og:description" content="([^"]+)"')
+        if description:
+            description = re.sub(r'&nbsp;', ' ', description)
+            description = re.sub(r'&amp;', '&', description)
+            description = re.sub(r'&#33;', '!', description)
+            description = re.sub(r'&lt;', '<', description)
+            description = re.sub(r'&gt;', '>', description)
+            description = re.sub(r'\s+', ' ', description).strip()
         description = clean_desc(description)
 
         # ── 멤버수 ──
@@ -138,26 +145,40 @@ def fetch_info(url):
             try:
                 s_html = _fetch_html(preview_url, HEADERS)
 
-                # 최근 게시글 (최대 5개)
+                # 최근 게시글 (최대 5개) - 개선된 패턴
                 raw_msgs = re.findall(
-                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>',
+                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>\s*(?:<div|</article)',
                     s_html
                 )
                 for raw in raw_msgs[:5]:
                     text = re.sub(r'<[^>]+>', '', raw).strip()
-                    text = re.sub(r'\s+', ' ', text)
+                    text = re.sub(r'&nbsp;', ' ', text)
+                    text = re.sub(r'&amp;', '&', text)
+                    text = re.sub(r'&lt;', '<', text)
+                    text = re.sub(r'&gt;', '>', text)
+                    text = re.sub(r'&#33;', '!', text)
+                    text = re.sub(r'\s+', ' ', text).strip()
                     if text and len(text) > 5:
                         recent_posts.append(text[:300])
 
-                # 핀 메시지 (공지)
+                # 핀 메시지 (공지) - tgme_widget_message_pinned 클래스 확인
                 m_pin = re.search(
-                    r'tgme_widget_message_pinned[\s\S]*?'
-                    r'<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>',
+                    r'<div class="[^"]*tgme_widget_message[^"]*pinned[^"]*"[^>]*>'
+                    r'[\s\S]*?<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)</div>',
                     s_html
                 )
+                if not m_pin:
+                    # 대안: service_message로 공지 감지
+                    m_pin = re.search(
+                        r'<div class="[^"]*service_message[^"]*"[^>]*>([\s\S]*?)</div>',
+                        s_html
+                    )
                 if m_pin:
                     pinned_post = re.sub(r'<[^>]+>', '', m_pin.group(1)).strip()
-                    pinned_post = re.sub(r'\s+', ' ', pinned_post)[:300]
+                    pinned_post = re.sub(r'&nbsp;', ' ', pinned_post)
+                    pinned_post = re.sub(r'\s+', ' ', pinned_post).strip()[:300]
+                    if not pinned_post or len(pinned_post) < 3:
+                        pinned_post = None
 
                 # /s/ 페이지에서 멤버수 보완
                 if not members:
